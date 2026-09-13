@@ -3,6 +3,7 @@ import numpy as np
 import pyccl as ccl
 from tjpcov.covariance_gaussian_fsky import FourierGaussianFsky
 from augur.utils.config_io import parse_array
+from augur.generate_utils.cmb_lensing import CMB_TRACER_NAME, get_cmb_noise
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,12 @@ def get_noise_power(config, S, tracer_name, return_ndens=False):
         trobj = S.get_tracer(tr)
         # obtain some arbitrary number of bins
         prefix = tr.rstrip('0123456789')
+        # Skip tracers that carry no n(z) -- e.g. a CMB convergence Map tracer.
+        # This loop runs over every tracer in the file regardless of which one
+        # was asked about, so without this guard the mere presence of such a
+        # tracer breaks get_noise_power for `src`/`lens` too.
+        if prefix not in nz_all:
+            continue
         nz_all[prefix].append(trobj.nz)
     tracer_prefix = tracer_name.rstrip('0123456789')
     tracer_bin_str = tracer_name[len(tracer_prefix):]
@@ -113,11 +120,25 @@ def get_gaus_cov(S, lk, cosmo, fsky, config):
         stat_name: np.asarray(parse_array(stat_cfg['ell_edges']))
         for stat_name, stat_cfg in config['statistics'].items()
     }
+    # CMB lensing statistics live in their own config section but share the
+    # same ell-edge bookkeeping.
+    cmb_cfg = config.get('cmb_lensing', None)
+    if cmb_cfg is not None:
+        for stat_name, stat_cfg in cmb_cfg.get('statistics', {}).items():
+            ell_edges_by_stat[stat_name] = np.asarray(parse_array(stat_cfg['ell_edges']))
 
-    def _noise_between(tr_a_name, tr_b_name):
+    def _noise_between(tr_a_name, tr_b_name, ells):
         """Uncorrelated noise term N_ab (non-zero only for auto-tracer pairs)."""
         if tr_a_name != tr_b_name:
             return 0.0
+        if tr_a_name == CMB_TRACER_NAME:
+            if cmb_cfg is None:
+                raise ValueError(
+                    f"SACC contains the tracer '{CMB_TRACER_NAME}' but the config "
+                    "has no `cmb_lensing` section to take its reconstruction "
+                    "noise from."
+                )
+            return get_cmb_noise(cmb_cfg, ells)
         return get_noise_power(config, S, tr_a_name)
 
     # Loop over statistic in the likelihood (assuming 3x2pt so far)
@@ -153,10 +174,10 @@ def get_gaus_cov(S, lk, cosmo, fsky, config):
 
             # Add uncorrelated noise (shot/shape) terms for auto-tracer pairs:
             # C_ab -> C_ab + N_ab, where N_ab != 0 only if a == b.
-            cls13 += _noise_between(tr1_name, tr3_name)
-            cls24 += _noise_between(tr2_name, tr4_name)
-            cls14 += _noise_between(tr1_name, tr4_name)
-            cls23 += _noise_between(tr2_name, tr3_name)
+            cls13 += _noise_between(tr1_name, tr3_name, ells_here)
+            cls24 += _noise_between(tr2_name, tr4_name, ells_here)
+            cls14 += _noise_between(tr1_name, tr4_name, ells_here)
+            cls23 += _noise_between(tr2_name, tr3_name, ells_here)
 
             # Normalization factor
             dell = np.diff(ell_edges_by_stat[stat_here])[:len(ells_here)]
@@ -249,6 +270,86 @@ class TJPCovGaus(FourierGaussianFsky):
     def __init__(self, config):
         super().__init__(config)
         # self.tracer_Noise = self.tracer_Noise_coupled
+
+    def get_tracer_info(self, return_noise_coupled=False):
+        """Return tracer info, supplying the CMB convergence noise TJPCov omits.
+
+        TJPCov builds a ``CMBLensingTracer`` for ``quantity == 'cmb_convergence'``
+        but never assigns it a ``tracer_Noise`` entry, so
+        ``FourierGaussianFsky.get_covariance_block`` raises ``KeyError``. That
+        hits 5x2pt as well as 6x2pt, because the guard compares the *first*
+        tracer of each pair and so the ``(kappa, lens_i) x (kappa, lens_j)``
+        cross-block trips it even with no kappa auto-spectrum present.
+
+        TEMPORARY. The real fix belongs upstream in TJPCov
+        (https://github.com/LSSTDESC/TJPCov/issues/124); remove this override
+        once that lands rather than leaving CMB-lensing knowledge about another
+        package sitting in augur.
+
+        ``tjpcov.cmb_noise`` may be a scalar or an array on the binning grid.
+        """
+        ccl_tracers, tracer_Noise, tracer_Noise_coupled = super().get_tracer_info(
+            return_noise_coupled=True
+        )
+
+        cmb_noise_cfg = self.config['tjpcov'].get('cmb_noise', 0.0)
+        ell, _, _ = self.get_binning_info()
+        if isinstance(cmb_noise_cfg, dict):
+            # A `cmb_lensing` config section: evaluate the curve on TJPCov's own
+            # integration grid, which is the only way to be sure of the length.
+            cmb_noise = get_cmb_noise(cmb_noise_cfg, ell)
+        else:
+            cmb_noise = np.asarray(cmb_noise_cfg, dtype=float)
+            if cmb_noise.ndim > 1:
+                raise ValueError(
+                    "`tjpcov.cmb_noise` must be a scalar, a 1D array or a "
+                    f"`cmb_lensing` config dict, got shape {cmb_noise.shape}."
+                )
+            if cmb_noise.ndim == 1 and cmb_noise.size != len(ell):
+                # A silent length mismatch would broadcast into a wrong
+                # covariance rather than fail, so check it here.
+                raise ValueError(
+                    f"`tjpcov.cmb_noise` has {cmb_noise.size} entries but "
+                    f"TJPCov integrates over {len(ell)} ells. Pass the "
+                    "`cmb_lensing` config section instead and let it be "
+                    "evaluated on the right grid."
+                )
+            if cmb_noise.ndim == 0:
+                cmb_noise = float(cmb_noise)
+
+        # Outside the reconstruction band get_cmb_noise returns inf, which is
+        # the honest answer but would make the covariance non-invertible. Give
+        # those modes a large finite noise instead: the weight is ~0 either way.
+        if np.ndim(cmb_noise) > 0 and not np.all(np.isfinite(cmb_noise)):
+            finite = cmb_noise[np.isfinite(cmb_noise)]
+            if finite.size == 0:
+                raise ValueError(
+                    "The CMB lensing noise curve is infinite across the whole "
+                    "TJPCov ell range; check the reconstruction band against "
+                    "`tjpcov.binning_info.ell_edges`."
+                )
+            big = 1e6 * float(np.max(finite))
+            n_bad = int(np.sum(~np.isfinite(cmb_noise)))
+            logger.warning(
+                "%d of %d ells lie outside the CMB lensing reconstruction band; "
+                "their noise is set to %g so the covariance stays invertible.",
+                n_bad, cmb_noise.size, big,
+            )
+            cmb_noise = np.where(np.isfinite(cmb_noise), cmb_noise, big)
+
+        sacc_file = self.io.get_sacc_file()
+        for tracer in sacc_file.tracers:
+            tracer_dat = sacc_file.get_tracer(tracer)
+            if getattr(tracer_dat, 'quantity', None) == 'cmb_convergence':
+                tracer_Noise.setdefault(tracer, cmb_noise)
+
+        self.ccl_tracers = ccl_tracers
+        self.tracer_Noise = tracer_Noise
+        self.tracer_Noise_coupled = tracer_Noise_coupled
+
+        if return_noise_coupled:
+            return ccl_tracers, tracer_Noise, tracer_Noise_coupled
+        return ccl_tracers, tracer_Noise
 
     def get_binning_info(self):
         ell_eff = self.get_ell_eff()
