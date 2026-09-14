@@ -22,14 +22,24 @@ from augur.generate import generate
 from augur.utils.config_io import parse_config
 
 
+_CACHE = {}
+
+
 def _generate_sacc(config_name, tmp_path):
-    """Run generate() into tmp_path and hand back the reloaded sacc."""
-    base_path = Path(__file__).parent
-    config = parse_config(f'{base_path}/{config_name}')
-    sacc_path = tmp_path / 'cov_structure.sacc'
-    config['fiducial_sacc_path'] = str(sacc_path)
-    generate(config)
-    return sacc.Sacc.load_fits(str(sacc_path))
+    """Run generate() once per config and hand back the reloaded sacc.
+
+    Cached because every assertion below wants the same sacc and generating it
+    is the expensive part -- the TJPCov config in particular. The sacc is never
+    mutated by these tests, so sharing it is safe.
+    """
+    if config_name not in _CACHE:
+        base_path = Path(__file__).parent
+        config = parse_config(f'{base_path}/{config_name}')
+        sacc_path = tmp_path / f'{Path(config_name).stem}.sacc'
+        config['fiducial_sacc_path'] = str(sacc_path)
+        generate(config)
+        _CACHE[config_name] = sacc.Sacc.load_fits(str(sacc_path))
+    return _CACHE[config_name]
 
 
 def _covmat(S):
@@ -39,7 +49,11 @@ def _covmat(S):
     return C
 
 
-CONFIGS = ['test_cmb_lensing_5x2pt.yaml', 'test_cmb_lensing.yaml']
+CONFIGS = [
+    'test_cmb_lensing_5x2pt.yaml',     # 5x2pt, internal Gaussian covariance
+    'test_cmb_lensing.yaml',           # 6x2pt, internal Gaussian covariance
+    'test_cmb_lensing_tjpcov.yaml',    # 6x2pt, TJPCov  (task E4)
+]
 
 
 @pytest.mark.parametrize('config_name', CONFIGS)
@@ -79,22 +93,31 @@ def test_covariance_diagonal_is_positive(config_name, tmp_path):
 
 @pytest.mark.parametrize('config_name', CONFIGS)
 def test_covariance_is_positive_definite(config_name, tmp_path):
-    """Cholesky, plus a scale-aware floor on the spectrum.
+    """Cholesky, plus a conditioning check on the CORRELATION matrix.
 
-    A bare `min(eigenvalue) > 0` says nothing here: the entries span many orders
-    of magnitude, so an absolute threshold encodes whatever scale this config
-    happens to have. Compare against the diagonal instead, which is the same
-    thing a condition number does.
+    Conditioning has to be judged scale-free. The raw covariance here has a
+    condition number around 1e13, which looks alarming and is not: the C_ell
+    values span many orders of magnitude across probes and ell, so that number
+    measures dynamic range, not degeneracy. Normalised by sqrt(diag) the same
+    matrix conditions at a few hundred.
+
+    So a threshold on the raw spectrum would encode whatever dynamic range this
+    particular config happens to have -- firing on a config with a wider range
+    while missing genuine degeneracy in a narrow one. The correlation matrix is
+    the quantity that actually answers "are any of these data points linearly
+    dependent".
     """
     C = _covmat(_generate_sacc(config_name, tmp_path))
     np.linalg.cholesky(C)                      # raises LinAlgError if not PD
 
-    eig = np.linalg.eigvalsh(C)
-    scale = np.max(np.diag(C))
-    assert eig.min() > 1e-14 * scale, (
-        f'covariance is numerically singular: smallest eigenvalue {eig.min():.3e} '
-        f'against a diagonal scale of {scale:.3e} '
-        f'(condition number {eig.max() / eig.min():.3e})'
+    d = np.sqrt(np.diag(C))
+    corr = C / np.outer(d, d)
+    eig = np.linalg.eigvalsh(corr)
+    assert eig.min() > 1e-8, (
+        f'covariance is degenerate once scale is divided out: smallest '
+        f'correlation-matrix eigenvalue {eig.min():.3e} '
+        f'(condition number {eig.max() / eig.min():.3e}). Healthy values for '
+        f'these configs are around 1e-2 and a few hundred respectively.'
     )
 
 
@@ -118,3 +141,50 @@ def test_5x2pt_has_the_crosses_but_not_the_kappa_auto(tmp_path):
 def test_6x2pt_has_the_kappa_auto(tmp_path):
     S = _generate_sacc('test_cmb_lensing.yaml', tmp_path)
     assert 'cmb_convergence_cl' in set(S.get_data_types())
+
+
+def test_tjpcov_covers_a_kappa_sacc_at_all(tmp_path):
+    """Task E4. Stock TJPCov raises KeyError on any sacc containing kappa.
+
+    TJPCovGaus.get_tracer_info overrides that to inject the reconstruction
+    noise. The override had no committed test -- reaching this assertion at all
+    is the regression, since without it generate() raises during covariance
+    assembly.
+
+    The kappa-galaxy cross blocks are covered here too, not just the kappa
+    auto: TJPCov's missing-noise lookup keys off the first tracer of each pair,
+    so `cmbGalaxy_*` trips it exactly as `cmb_convergence_cl` does. That is why
+    a separate 5x2pt TJPCov config would add runtime without adding coverage.
+    """
+    S = _generate_sacc('test_cmb_lensing_tjpcov.yaml', tmp_path)
+    types = set(S.get_data_types())
+    assert {'cmb_convergence_cl',
+            'cmbGalaxy_convergenceDensity_cl',
+            'cmbGalaxy_convergenceShear_cl_e'} <= types
+
+    C = _covmat(S)
+    # get_tracer_info replaces the infinite noise outside the reconstruction
+    # band with a large finite value, specifically so the covariance stays
+    # invertible. If that substitution regresses, these go non-finite.
+    assert np.all(np.isfinite(C))
+    assert np.all(np.diag(C) > 0.0)
+
+
+def test_tjpcov_ell_edges_check_covers_the_kappa_statistics(tmp_path):
+    """The binning cross-check used to look only at `config['statistics']`.
+
+    The kappa statistics live in their own config section, so the identical
+    mismatch raised on a galaxy statistic and passed silently on a kappa one --
+    leaving TJPCov binning the kappa blocks differently from the data vector.
+    """
+    base_path = Path(__file__).parent
+    config = parse_config(f'{base_path}/test_cmb_lensing_tjpcov.yaml')
+    config['fiducial_sacc_path'] = str(tmp_path / 'mismatch.sacc')
+    # Perturb only a kappa statistic's binning; every galaxy one still agrees.
+    config['cmb_lensing']['statistics']['cmb_convergence_cl']['ell_edges'] = (
+        'np.geomspace(20, 1500, 7, endpoint=True)'
+    )
+
+    with pytest.raises(ValueError, match='ell_edges') as exc_info:
+        generate(config)
+    assert 'cmb_convergence_cl' in str(exc_info.value)
