@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from augur.analyze import Analyze
+from augur.analyze import Analyze, _sum_mnu
 
 
 class DummyLikelihood:
@@ -52,6 +52,40 @@ def test_get_Om_with_mnu():
     a = make_analyze(['Omega_c', 'Omega_b', 'm_nu', 'h'], pars)
     expected = pars['Omega_c'] + pars['Omega_b'] + pars['m_nu'] / pars['h'] / pars['h'] / 93.14
     assert pytest.approx(a.get_Om(), rel=1e-6) == expected
+
+
+def test_sum_mnu_every_convention():
+    # CCL's conventions come in two shapes: sum/normal/inverted/equal/single store
+    # Sum(m_nu) itself, 'list' stores one mass per species. Both must reduce to the
+    # same float without anyone having to look at mass_split.
+    assert _sum_mnu(0.06) == pytest.approx(0.06)
+    assert _sum_mnu([0.05, 0.01, 0.0]) == pytest.approx(0.06)
+    assert _sum_mnu(np.array([0.05, 0.01, 0.0])) == pytest.approx(0.06)
+    assert _sum_mnu(0.0) == 0.0
+    assert _sum_mnu([]) == 0.0
+    assert isinstance(_sum_mnu(np.float64(0.06)), float)
+
+
+def test_get_Om_list_mnu():
+    # Regression for analyze.py:329. Under mass_split 'list' the fiducial cosmology
+    # carries one mass per species, and `m_nu > 0.0` raised
+    # `TypeError: '>' not supported between instances of 'list' and 'float'`
+    # before the masses could be summed. The masses are held fixed here rather than
+    # varied: varying m_nu under 'list' is a separate, invalid configuration.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': [0.05, 0.01, 0.0]}
+    a = make_analyze(['Omega_c', 'Omega_b', 'h'], pars)
+    expected = 0.25 + 0.06 / 0.7 / 0.7 / 93.14
+    assert pytest.approx(a.get_Om(), rel=1e-6) == expected
+
+
+def test_get_Om_list_mnu_matches_scalar():
+    # The same total mass, written either way, has to give the same Omega_m.
+    scalar = make_analyze(['Omega_c', 'Omega_b', 'h'],
+                          {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.06})
+    listed = make_analyze(['Omega_c', 'Omega_b', 'h'],
+                          {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7,
+                           'm_nu': [0.02, 0.02, 0.02]})
+    assert pytest.approx(listed.get_Om(), rel=1e-12) == scalar.get_Om()
 
 
 def test_get_Om_requires_Omega_c():
