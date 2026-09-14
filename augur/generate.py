@@ -823,7 +823,14 @@ def generate(configs, return_all_outputs=False, write_sacc=True, use_sacc=None,
         tjpcov_ell_edges = np.asarray(
             parse_array(config['cov_options']['binning_info']['ell_edges'])
         )
-        for stat_name, stat_info in config['statistics'].items():
+        # The kappa statistics live in their own config section, and were
+        # skipped here: a mismatch on a galaxy statistic raised while the same
+        # mismatch on a kappa one went through silently.
+        dv_statistics = dict(config['statistics'])
+        dv_statistics.update(
+            (config.get('cmb_lensing', None) or {}).get('statistics', {})
+        )
+        for stat_name, stat_info in dv_statistics.items():
             dv_ell_edges = np.asarray(parse_array(stat_info['ell_edges']))
             if (
                 tjpcov_ell_edges.shape != dv_ell_edges.shape
@@ -870,6 +877,13 @@ def generate(configs, return_all_outputs=False, write_sacc=True, use_sacc=None,
             if 'src' in tr:
                 tjpcov_config['tjpcov'][f'sigma_e_{tr}'] = config['sources']['ellipticity_error']
         if CMB_TRACER_NAME in S.tracers:
+            if 'cmb_lensing' not in config:
+                raise ValueError(
+                    f"The sacc contains the `{CMB_TRACER_NAME}` tracer but the config has "
+                    "no `cmb_lensing` section, so TJPCov has no reconstruction-noise "
+                    "curve for it and the kappa blocks would be noiseless. Please add a "
+                    "`cmb_lensing` section with a `noise_cl` or `noise` entry."
+                )
             # Pass the config section, not an evaluated curve: TJPCovGaus
             # evaluates it on TJPCov's own integration grid.
             tjpcov_config['tjpcov']['cmb_noise'] = config['cmb_lensing']

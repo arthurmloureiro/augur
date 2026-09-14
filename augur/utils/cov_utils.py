@@ -193,6 +193,49 @@ def get_gaus_cov(S, lk, cosmo, fsky, config):
     return cov_all
 
 
+def _srd_data_type(S, comb):
+    """
+    The sacc data type carrying a tracer pair, or a message saying it is absent.
+
+    `S.get_data_types(tracers=...)[0]` raises a bare `IndexError: list index out
+    of range` when the pair has no data points, naming neither the pair nor the
+    caller, which is unhelpful when it fires from inside a 27-by-27 loop.
+    """
+    dtypes = S.get_data_types(tracers=comb)
+    if not dtypes:
+        raise ValueError(
+            f"The SRD covariance expects the tracer pair {comb}, but the sacc has no "
+            "data points for it. The SRD v1 combination lists are fixed, so the sacc "
+            "must contain every pair the chosen release defines -- check the bin "
+            "counts and the scale cuts, which can drop a pair entirely."
+        )
+    return dtypes[0]
+
+
+def cmb_lensing_tracers(S):
+    """
+    Names of the CMB lensing tracers in a sacc, if any.
+
+    Dispatches on `quantity`, not on the tracer name, so a sacc produced
+    elsewhere under a different name is still recognised. This is the same
+    test TJPCovGaus.get_tracer_info uses.
+
+    Parameters:
+    -----------
+    S : sacc.Sacc
+        Sacc object to inspect.
+
+    Returns:
+    --------
+    names : list of str
+        Sorted names of every tracer whose quantity is 'cmb_convergence'.
+    """
+    return sorted(
+        name for name, tracer in S.tracers.items()
+        if getattr(tracer, 'quantity', None) == 'cmb_convergence'
+    )
+
+
 def get_SRD_cov(config, S):
     """
     Read covariance file from SRD v1:
@@ -213,6 +256,23 @@ def get_SRD_cov(config, S):
     """
     if 'SRD_cov_path' not in config.keys():
         raise ValueError('SRD_cov_path is needed to use SRD covariance.')
+
+    # The SRD v1 covariance predates CMB lensing: its combination lists below
+    # name only src/lens pairs. A kappa sacc would therefore leave whole rows
+    # and columns of the returned matrix at zero -- no error, no warning --
+    # giving a singular covariance and, eventually, a NaN Fisher matrix. Refuse
+    # rather than return something silently unusable.
+    kappa_tracers = cmb_lensing_tracers(S)
+    if kappa_tracers:
+        raise ValueError(
+            f"The sacc contains CMB lensing tracer(s) {kappa_tracers}, which "
+            "`cov_options.cov_type: 'SRD'` cannot cover: the SRD v1 covariance "
+            "predates CMB lensing and its hard-coded combination lists contain no "
+            "kappa pairs, so those rows and columns would be left at zero and the "
+            "covariance would be singular. Use `cov_type: 'gaus_internal'` or "
+            "`cov_type: 'tjpcov'` instead."
+        )
+
     cov_in = np.load(config['SRD_cov_path'])
     ncls = 20
     # Data combinations for Y1 as per SRD v1
@@ -244,17 +304,55 @@ def get_SRD_cov(config, S):
                       ('lens6', 'lens6'), ('lens7', 'lens7'), ('lens8', 'lens8'),
                       ('lens9', 'lens9')]
 
+    # The release is chosen by sniffing the filename, so a Y10 covariance saved
+    # under a name without a literal 'Y10' would silently be read with the Y1
+    # combination list. Cross-check the choice against the sacc, which knows how
+    # many bins it actually has.
     if 'Y10' in config['SRD_cov_path']:
-        data_combs = data_combs_y10
+        data_combs, release, other = data_combs_y10, 'Y10', 'Y1'
     else:
-        data_combs = data_combs_y1
+        data_combs, release, other = data_combs_y1, 'Y1', 'Y10'
+
+    tracers_y1 = {tr for comb in data_combs_y1 for tr in comb}
+    tracers_y10 = {tr for comb in data_combs_y10 for tr in comb}
+    needed = tracers_y10 if release == 'Y10' else tracers_y1
+    other_needed = tracers_y1 if release == 'Y10' else tracers_y10
+    in_sacc = set(S.tracers)
+
+    rename_hint = (
+        " The release is chosen by looking for 'Y10' in the filename, so either "
+        "rename the file or point at the right one."
+    )
+    missing = sorted(needed - in_sacc)
+    if missing:
+        hint = (
+            f" The sacc does match the {other} layout, so `SRD_cov_path` is probably "
+            f"a {other} covariance." + rename_hint
+            if not (other_needed - in_sacc) else ""
+        )
+        raise ValueError(
+            f"`SRD_cov_path` was read as {release} (from its filename), but the sacc "
+            f"is missing tracer(s) {missing} that the {release} combination list "
+            f"requires.{hint}"
+        )
+    # The Y1 tracer names are a subset of the Y10 ones, so a Y10 sacc satisfies
+    # the Y1 list and the check above cannot see it. Catch that direction too,
+    # or the asymmetry leaves the more likely mistake -- a Y10 run reading a
+    # covariance whose filename lost its 'Y10' -- silently using 27 of the 50
+    # blocks.
+    if release == 'Y1' and not (tracers_y10 - in_sacc):
+        raise ValueError(
+            "`SRD_cov_path` was read as Y1 (from its filename), but the sacc carries "
+            "the full Y10 tracer set, so only the 27 Y1 blocks would be filled and "
+            "the rest of the covariance would be left at zero." + rename_hint
+        )
 
     cov_sacc_all = np.zeros((len(S.mean), len(S.mean)))
     for i, comb1 in enumerate(data_combs):
-        dtype_here1 = S.get_data_types(tracers=comb1)[0]
+        dtype_here1 = _srd_data_type(S, comb1)
         inds1 = S.indices(data_type=dtype_here1, tracers=comb1)
         for j, comb2 in enumerate(data_combs):
-            dtype_here2 = S.get_data_types(tracers=comb2)[0]
+            dtype_here2 = _srd_data_type(S, comb2)
             inds2 = S.indices(data_type=dtype_here2, tracers=comb2)
             inds_all = np.meshgrid(inds1, inds2)
             cov_sacc_all[inds_all[0].T, inds_all[1].T] = cov_in[ncls*i:ncls*i+len(inds1),
