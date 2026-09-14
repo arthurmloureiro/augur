@@ -179,7 +179,21 @@ def get_gaus_cov(S, lk, cosmo, fsky, config):
             cls14 += _noise_between(tr1_name, tr4_name, ells_here)
             cls23 += _noise_between(tr2_name, tr3_name, ells_here)
 
-            # Normalization factor
+            # Normalization factor.
+            #
+            # One scalar fsky for every block, on purpose. It is tempting to
+            # give each block its own sky fraction -- the LSST footprint for
+            # 3x2pt blocks, the CMB footprint for the kappa auto, the overlap
+            # for the cross blocks. That is not positive-definite: a block's
+            # variance would use one area and its cross-covariance with another
+            # block a different (smaller) one, so the implied correlation
+            # exceeds 1 (Cauchy-Schwarz) and cholesky fails for every physical
+            # choice where the overlap is smaller than the autos. The fsky
+            # approximation only yields a valid covariance with a single shared
+            # value; use the LSST-CMB overlap (~ the LSST area, since LSST sits
+            # inside the SO/Planck footprints). A genuinely per-footprint
+            # covariance needs mask deconvolution (NaMaster / TJPCov's
+            # FourierGaussianNmt), not a per-block fsky.
             dell = np.diff(ell_edges_by_stat[stat_here])[:len(ells_here)]
             norm = dell*(2*ells_here+1)*fsky
             cov_here = cls13*cls24 + cls14*cls23
