@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Saccs written by the test suite into the working directory
+# (test.yaml / test_cmb_lensing.yaml set relative fiducial_sacc_path).
+*.sacc

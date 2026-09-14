@@ -28,6 +28,7 @@ from augur.utils.config_io import parse_config
 from augur.utils.firecrown_interface import create_modeling_tools, create_twopoint_filter
 import warnings
 from augur.utils.config_io import parse_array, validate_amplitude_parameter
+from augur.utils.config_io import validate_cmb_z_source, CMB_Z_SOURCE_DEFAULT
 
 logger = logging.getLogger(__name__)
 
@@ -561,8 +562,30 @@ def generate(configs, return_all_outputs=False, write_sacc=True, use_sacc=None,
             elif tracer_obj.quantity == "cmb_convergence":
                 # z_source is carried in the sacc tracer metadata, so a sacc
                 # read back here does not need the cmb_lensing config section.
-                z_lss = getattr(tracer_obj, 'metadata', {}).get('z_lss', 1100.0)
+                _meta = getattr(tracer_obj, 'metadata', None) or {}
+                if 'z_lss' in _meta:
+                    z_lss = float(_meta['z_lss'])
+                else:
+                    # Absence is not evidence of the default -- an externally
+                    # produced sacc may simply not record it. Say so rather
+                    # than silently assuming, and keep today's behaviour.
+                    z_lss = CMB_Z_SOURCE_DEFAULT
+                    warnings.warn(
+                        f"The sacc tracer '{tracer_name}' carries no `z_lss` metadata, so "
+                        f"its source redshift cannot be cross-checked; assuming "
+                        f"{CMB_Z_SOURCE_DEFAULT}. The theory prediction will use "
+                        "`Firecrown_Factory.TwoPointFactory.cmb_factories[].z_source` "
+                        "regardless."
+                    )
                 add_cmb_tracer(S, sources, z_lss)
+                # The sacc wins on this path, so it -- not cmb_lensing.z_source --
+                # is what must agree with the firecrown factory. No covariance is
+                # computed here, so the TJPCov guard does not apply.
+                validate_cmb_z_source(
+                    config, z_source=z_lss,
+                    origin=f"the sacc tracer '{tracer_name}' metadata `z_lss`",
+                    check_cov_type=False,
+                )
 
         if 'statistics' not in config.keys():
             raise ValueError('statistics key is required in config file')
@@ -722,6 +745,10 @@ def generate(configs, return_all_outputs=False, write_sacc=True, use_sacc=None,
             return lk
 
     # Rest of function is only triggered when use_sacc is None
+
+    # Fails before any cosmology or tracer is built, so a config whose kappa
+    # source redshift disagrees between sections costs nothing to reject.
+    validate_cmb_z_source(config)
 
     # Generate placeholders
     S, cosmo, stats, sys_params, tp_filters = generate_sacc_and_stats(config)
