@@ -62,6 +62,8 @@ def test_generate_use_sacc_round_trip_cmb_lensing(tmp_path):
     types = {st.statistic.sacc_data_type for st in lk.statistics}
     assert types == set(S.get_data_types())
     assert 'cmb_convergence_cl' in types
+
+
 def _cmb_config(**overrides):
     """Load the tiny 6x2pt config as a dict so a test can mutate it."""
     base_path = Path(__file__).parent

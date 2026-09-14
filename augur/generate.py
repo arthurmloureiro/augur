@@ -18,7 +18,6 @@ from augur.generate_utils.cmb_lensing import add_cmb_lensing, add_cmb_tracer
 from augur.generate_utils.cmb_lensing import CMB_TRACER_NAME
 from augur.generate_utils.cmb_lensing import _tracer_pair as _cmb_tracer_pair
 from augur.utils.theory_utils import compute_new_theory_vector
-from copy import deepcopy
 import firecrown.likelihood.weak_lensing as wl
 import firecrown.likelihood.number_counts as nc
 from firecrown.likelihood.two_point import TwoPoint
