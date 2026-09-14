@@ -17,6 +17,29 @@ logger = logging.getLogger(__name__)
 mnu_norm = 93.14  # eV
 
 
+def _sum_mnu(m_nu):
+    """
+    Total neutrino mass, whatever convention the fiducial cosmology stores it in.
+
+    CCL's five mass splits come in two shapes: `sum`, `normal`, `inverted`, `equal`
+    and `single` take a scalar that *is* the total mass, while `list` takes one mass
+    per species. Summing covers both, so this never has to read `mass_split` and
+    cannot fall out of step with the value passed to `CCLFactory`.
+
+    Parameters:
+    -----------
+    m_nu : float or array_like
+        Neutrino mass entry of the fiducial cosmology, as `ccl.Cosmology.to_dict`
+        returns it.
+
+    Returns:
+    --------
+    sum_mnu : float
+        Sum of the neutrino masses in eV.
+    """
+    return float(np.sum(np.atleast_1d(m_nu)))
+
+
 class Analyze(object):
     def __init__(self, config, likelihood=None, tools=None, req_params=None,
                  norm_step=False):
@@ -325,7 +348,7 @@ class Analyze(object):
             if 'Omega_b' in self.pars_fid.keys():
                 Om += self.pars_fid['Omega_b']
             if 'm_nu' in self.pars_fid.keys():
-                m_nu = self.pars_fid['m_nu']
+                m_nu = _sum_mnu(self.pars_fid['m_nu'])
                 if m_nu > 0.0:
                     if 'h' not in self.pars_fid.keys():
                         raise ValueError('Require h to be specified \
