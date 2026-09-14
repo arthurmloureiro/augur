@@ -116,3 +116,61 @@ def test_generate_accepts_matching_non_default_z_source(tmp_path):
 
     generate(config)
 
+
+def _generate_kappa_sacc(tmp_path):
+    """Write a 6x2pt sacc and reload it, for the `use_sacc` z_source checks."""
+    base_path = Path(__file__).parent
+    config = parse_config(f'{base_path}/test_cmb_lensing.yaml')
+    sacc_path = tmp_path / 'zsource.sacc'
+    config['fiducial_sacc_path'] = str(sacc_path)
+    generate(config)
+    return sacc.Sacc.load_fits(str(sacc_path)), str(sacc_path)
+
+
+def test_generate_use_sacc_raises_on_sacc_factory_mismatch(tmp_path):
+    """On this path the sacc is authoritative, not `cmb_lensing.z_source`.
+
+    So the pair that must agree is the sacc's own `z_lss` and the firecrown
+    factory -- the config section is deliberately ignored here, and a check
+    reading it would reject perfectly good runs with a stale config block.
+    """
+    S, sacc_path = _generate_kappa_sacc(tmp_path)
+
+    base_path = Path(__file__).parent
+    config = parse_config(f'{base_path}/test_cmb_lensing.yaml')
+    config['Firecrown_Factory']['TwoPointFactory']['cmb_factories'][0]['z_source'] = 950.0
+
+    with pytest.raises(ValueError, match='z_lss') as exc_info:
+        generate(config, return_all_outputs=True, write_sacc=False,
+                 use_sacc=S, sacc_path=sacc_path)
+    msg = str(exc_info.value)
+    assert '950.0' in msg and '1100.0' in msg
+
+
+def test_generate_use_sacc_warns_when_sacc_has_no_z_lss(tmp_path):
+    """An externally produced sacc may simply not record `z_lss`.
+
+    Absence is not evidence of 1100, so warn and carry on rather than refusing
+    to read someone else's sacc. Numerical behaviour is unchanged.
+    """
+    S, sacc_path = _generate_kappa_sacc(tmp_path)
+    del S.get_tracer('cmb_convergence').metadata['z_lss']
+
+    base_path = Path(__file__).parent
+    config = parse_config(f'{base_path}/test_cmb_lensing.yaml')
+
+    with pytest.warns(UserWarning, match='no `z_lss` metadata'):
+        generate(config, return_all_outputs=True, write_sacc=False,
+                 use_sacc=S, sacc_path=sacc_path)
+
+
+def test_generate_use_sacc_accepts_a_matching_sacc(tmp_path):
+    """The default round-trip must keep working: sacc and factory both at 1100."""
+    S, sacc_path = _generate_kappa_sacc(tmp_path)
+    base_path = Path(__file__).parent
+    config = parse_config(f'{base_path}/test_cmb_lensing.yaml')
+
+    lk, _, _ = generate(config, return_all_outputs=True, write_sacc=False,
+                        use_sacc=S, sacc_path=sacc_path)
+    types = {st.statistic.sacc_data_type for st in lk.statistics}
+    assert 'cmb_convergence_cl' in types
