@@ -15,7 +15,7 @@ import numpy as np
 
 from firecrown.likelihood import CMBConvergence, TwoPoint
 
-from augur.utils.config_io import parse_array
+from augur.utils.config_io import parse_array, CMB_Z_SOURCE_DEFAULT
 from augur.utils.firecrown_interface import create_twopoint_filter
 
 logger = logging.getLogger(__name__)
@@ -270,7 +270,7 @@ def add_cmb_lensing(config, S, sources, dndz, cosmo):
                 f"Supported keys are: {sorted(SUPPORTED_CMB_STATISTICS)}"
             )
 
-    z_source = cmb_cfg.get('z_source', 1100.0)
+    z_source = cmb_cfg.get('z_source', CMB_Z_SOURCE_DEFAULT)
     lmax_overall = max(
         (float(cfg['lmax']) for cfg in stat_keys.values()
          if cfg.get('lmax', None) not in (None, 'None')),
