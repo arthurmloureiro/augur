@@ -100,6 +100,74 @@ def _dOm_dpars_from_neutrinos(var_pars, pars_fid):
     return dOm
 
 
+def _neutrino_mass_floor(mass_split):
+    """
+    Return the smallest total neutrino mass a mass split admits, or None if unconstrained.
+
+    `normal` and `inverted` fix the two squared-mass differences, so the total mass
+    cannot go below the value it takes when the lightest species is massless. The
+    degenerate splits carry no such constraint.
+
+    The floor is built from CCL's own oscillation constants rather than hard-coded, so
+    it follows them if they are ever revised. It is deliberately not delegated to CCL's
+    `nu_masses`: that guard is correct for `normal`, but for `inverted` it subtracts
+    the solar splitting where the solve adds it, so it admits totals about 1.5 meV below
+    the true floor and returns a negative lightest mass there without raising.
+
+    Parameters:
+    -----------
+    mass_split : str or None
+        CCL mass split. None (an unspecified split) is treated as unknown.
+
+    Returns:
+    --------
+    floor : float or None
+        Smallest physical Sum(m_nu) in eV, or None if the split does not constrain it.
+    """
+    c = ccl.physical_constants
+    if mass_split == 'normal':
+        return np.sqrt(c.DELTAM12_sq) + np.sqrt(c.DELTAM13_sq_pos)
+    if mass_split == 'inverted':
+        # At the floor the lightest (m3) vanishes, so m1^2 = |DELTAM13_sq_neg| and
+        # m2^2 = m1^2 + DELTAM12_sq -- the sign CCL's own guard gets wrong.
+        d13 = abs(c.DELTAM13_sq_neg)
+        return np.sqrt(d13) + np.sqrt(d13 + c.DELTAM12_sq)
+    return None
+
+
+def _derivative_probe_drop(method, step, derivative_args, x0):
+    """
+    Return how far below x0 the configured derivative method samples.
+
+    Parameters:
+    -----------
+    method : str
+        Derivative method: `5pt_stencil`, `numdifftools` or `derivkit`.
+    step : float
+        Configured step size, in the units the method uses.
+    derivative_args : dict
+        Extra keyword arguments for the method.
+    x0 : float
+        Pivot value of the parameter.
+
+    Returns:
+    --------
+    drop : float
+        Distance below x0 of the lowest sample.
+    """
+    if 'derivkit' in method:
+        # derivkit never reads `step`. Its adaptive grid is Chebyshev nodes on
+        # [x0 - h, x0 + h] with h from its own spacing rule, so reuse that rule
+        # rather than restating it here. augur's defaults are '1%' and 1e-3.
+        from derivkit.derivatives.adaptive.spacing import resolve_spacing
+        return resolve_spacing(derivative_args.get('spacing', '1%'), x0,
+                               derivative_args.get('base_abs', 1.e-3))
+    # five_pt_stencil evaluates at x0 - 2h. numdifftools' central difference only
+    # reaches x0 - h, but `derivative_args` can hand it a step generator that widens
+    # that, so it takes the same margin.
+    return 2.0 * step
+
+
 class Analyze(object):
     def __init__(self, config, likelihood=None, tools=None, req_params=None,
                  norm_step=False):
@@ -179,6 +247,7 @@ class Analyze(object):
         self._unpack_gaussian_priors()
         self._unpack_norm_step()
         self._unpack_derivative_method()
+        self._validate_neutrino_step()
 
     def _unpack_transformations(self):
         """
@@ -288,6 +357,7 @@ class Analyze(object):
         if 'parameters' in self.config.keys():
             self.var_pars = list(self.config['parameters'].keys())
             self._validate_amplitude_in_var_pars()
+            self._validate_neutrino_var_pars()
             for var in self.var_pars:
                 _val = self.config['parameters'][var]
                 if isinstance(_val, list):
@@ -301,6 +371,7 @@ class Analyze(object):
         elif 'var_pars' in self.config.keys():
             self.var_pars = self.config['var_pars']
             self._validate_amplitude_in_var_pars()
+            self._validate_neutrino_var_pars()
             for var in self.var_pars:
                 if var in self.pars_fid.keys():
                     self.x.append(self.pars_fid[var])
@@ -312,6 +383,61 @@ class Analyze(object):
         # Cast to numpy array (this will be done later anyway)
         self.x = np.array(self.x).astype(np.float64)
         self.par_bounds = np.array(self.par_bounds)
+
+    def _validate_neutrino_var_pars(self):
+        """
+        Check that varying the neutrino mass is compatible with the fiducial cosmology.
+
+        Raises ValueError if `m_nu` is varied while the fiducial cosmology carries one
+        mass per species, which `mass_split: 'list'` does. There is no single number to
+        step in that case: the pivot vector cannot hold a sequence, and the cast below
+        would fail with a numpy message naming neither the parameter nor the split.
+        """
+        if 'm_nu' not in self.var_pars:
+            return
+        if np.ndim(self.pars_fid.get('m_nu', 0.0)) > 0:
+            raise ValueError(
+                "m_nu is listed in var_pars but the fiducial cosmology carries one mass "
+                f"per species ({self.pars_fid['m_nu']}), as mass_split='list' does. Vary "
+                "the total mass with a scalar split -- equal, normal, inverted or single "
+                "-- or drop m_nu from var_pars and keep the masses fixed."
+            )
+
+    def _validate_neutrino_step(self):
+        """
+        Check that the derivative will not step below the neutrino mass hierarchy floor.
+
+        `normal` and `inverted` admit no total mass below the value at which the
+        lightest species vanishes. A derivative that samples under it aborts the run
+        partway through -- or worse, under `inverted`, silently uses a negative mass
+        (see `_neutrino_mass_floor`). Both are far cheaper to catch here than after
+        hours of C_ell evaluations.
+
+        Assumes the fiducial cosmology itself is physical: CCL would already have
+        refused to build it otherwise. A `pars_fid` with no `mass_split` is treated as
+        unknown and skipped; one built from a CCL cosmology always carries it.
+        """
+        if 'm_nu' not in self.var_pars:
+            return
+        floor = _neutrino_mass_floor(self.pars_fid.get('mass_split'))
+        if floor is None:
+            return
+        ind_nu = np.where(np.array(self.var_pars) == 'm_nu')[0][0]
+        sum_fid = float(self.x[ind_nu])
+        drop = _derivative_probe_drop(self.derivative_method, self.step_size,
+                                      self.derivative_args, sum_fid)
+        if self.norm_step and (self.norm is not None) and 'derivkit' not in \
+                self.derivative_method:
+            # The step is applied in normalised coordinates, so scale it back.
+            drop *= float(self.norm[ind_nu])
+        if sum_fid - drop < floor:
+            raise ValueError(
+                f"The {self.pars_fid['mass_split']} hierarchy admits no total neutrino "
+                f"mass below {floor:.5f} eV, but the {self.derivative_method} derivative "
+                f"samples down to {sum_fid - drop:.5f} eV from a fiducial of "
+                f"{sum_fid:.5f} eV. Raise the fiducial m_nu, shrink the step, or use a "
+                "mass split with no hierarchy constraint."
+            )
 
     def _validate_amplitude_in_var_pars(self):
         """
