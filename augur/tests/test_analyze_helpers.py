@@ -202,9 +202,25 @@ def test_neutrino_mass_floor_matches_ccl_constants():
     ih = np.sqrt(d13) + np.sqrt(d13 + c.DELTAM12_sq)
     assert pytest.approx(_neutrino_mass_floor('normal'), rel=1e-12) == nh
     assert pytest.approx(_neutrino_mass_floor('inverted'), rel=1e-12) == ih
-    # No hierarchy constraint for the rest, and an unspecified split is unknown.
-    for split in ['equal', 'single', 'sum', 'list', None]:
+    # The degenerate splits have no hierarchy, but masses still cannot be negative.
+    for split in ['equal', 'single', 'sum']:
+        assert _neutrino_mass_floor(split) == 0.0
+    # 'list' has no scalar to step, and an unspecified split is unknown.
+    for split in ['list', None]:
         assert _neutrino_mass_floor(split) is None
+
+
+def test_ccl_is_silently_flat_below_zero_mass():
+    # Why the degenerate floor is 0 and not None: CCL accepts a negative total under
+    # 'equal', clamps Omega_nu to zero and raises nothing, so the theory below zero is
+    # the massless one. A central difference straddling 0 then halves the derivative.
+    def pk(m_nu):
+        c = ccl.Cosmology(Omega_c=0.25, Omega_b=0.05, h=0.7, n_s=0.96, sigma8=0.8,
+                          m_nu=m_nu, mass_split='equal',
+                          transfer_function='eisenstein_hu')
+        return ccl.linear_matter_power(c, 0.5, 1.0)
+    assert pk(-0.006) == pk(0.0)
+    assert pk(0.006) != pk(0.0)
 
 
 def test_neutrino_mass_floor_is_where_ccl_stops_being_physical():
@@ -255,7 +271,7 @@ def test_step_below_hierarchy_floor_raises():
     # the 0.0592 floor, and CCL would abort the run partway through the derivatives.
     pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.06,
             'mass_split': 'normal'}
-    with pytest.raises(ValueError, match='hierarchy'):
+    with pytest.raises(ValueError, match='admits no total neutrino mass'):
         make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg={'step': 0.006})
 
 
@@ -272,7 +288,7 @@ def test_derivkit_step_below_floor_raises():
     pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.06,
             'mass_split': 'normal'}
     cfg = {'derivative_method': 'derivkit', 'step': 1e-8}
-    with pytest.raises(ValueError, match='hierarchy'):
+    with pytest.raises(ValueError, match='admits no total neutrino mass'):
         make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg=cfg)
 
 
@@ -282,13 +298,23 @@ def test_inverted_floor_guards_ccl_silent_window():
     pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.0995,
             'mass_split': 'inverted'}
     cfg = {'derivative_method': 'derivkit', 'step': 1e-8}
-    with pytest.raises(ValueError, match='hierarchy'):
+    with pytest.raises(ValueError, match='admits no total neutrino mass'):
         make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg=cfg)
 
 
-def test_no_floor_check_for_degenerate_split():
-    # 'equal' has no hierarchy constraint, so a tiny fiducial is legal.
+def test_degenerate_split_step_below_zero_raises():
+    # Regression: Sum = 0.01 under 'equal' with a 0.006 step reaches -0.002, where CCL
+    # silently returns the massless theory. This used to pass unchecked.
     pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.01,
+            'mass_split': 'equal'}
+    with pytest.raises(ValueError, match='admits no total neutrino mass'):
+        make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg={'step': 0.006})
+
+
+def test_degenerate_split_small_fiducial_accepted():
+    # No hierarchy, so a fiducial far below the normal floor is fine while every
+    # sample stays non-negative: 0.02 - 2*0.006 = 0.008.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.02,
             'mass_split': 'equal'}
     a = make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg={'step': 0.006})
     assert a.var_pars == ['Omega_c', 'm_nu']
