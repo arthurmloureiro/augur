@@ -114,11 +114,14 @@ def _dOm_dpars_from_neutrinos(var_pars, pars_fid):
 
 def _neutrino_mass_floor(mass_split):
     """
-    Return the smallest total neutrino mass a mass split admits, or None if unconstrained.
+    Return the smallest total neutrino mass a mass split admits, or None if unknown.
 
     `normal` and `inverted` fix the two squared-mass differences, so the total mass
     cannot go below the value it takes when the lightest species is massless. The
-    degenerate splits carry no such constraint.
+    degenerate splits have no hierarchy, but the masses still cannot be negative, so
+    their floor is zero. That one CCL does not enforce at all: it accepts a negative
+    total, clamps Omega_nu to zero and returns the massless cosmology, so the theory
+    is silently flat below zero and a derivative straddling it comes out halved.
 
     The floor is built from CCL's own oscillation constants rather than hard-coded, so
     it follows them if they are ever revised. It is deliberately not delegated to CCL's
@@ -129,12 +132,13 @@ def _neutrino_mass_floor(mass_split):
     Parameters:
     -----------
     mass_split : str or None
-        CCL mass split. None (an unspecified split) is treated as unknown.
+        CCL mass split. None (an unspecified split) is treated as unknown, and so is
+        `list`, which has no single total to step.
 
     Returns:
     --------
     floor : float or None
-        Smallest physical Sum(m_nu) in eV, or None if the split does not constrain it.
+        Smallest physical Sum(m_nu) in eV, or None if it cannot be determined.
     """
     c = ccl.physical_constants
     if mass_split == 'normal':
@@ -144,6 +148,8 @@ def _neutrino_mass_floor(mass_split):
         # m2^2 = m1^2 + DELTAM12_sq -- the sign CCL's own guard gets wrong.
         d13 = abs(c.DELTAM13_sq_neg)
         return np.sqrt(d13) + np.sqrt(d13 + c.DELTAM12_sq)
+    if mass_split in ('equal', 'single', 'sum'):
+        return 0.0
     return None
 
 
@@ -447,13 +453,13 @@ class Analyze(object):
 
     def _validate_neutrino_step(self):
         """
-        Check that the derivative will not step below the neutrino mass hierarchy floor.
+        Check that the derivative will not step below the smallest physical neutrino mass.
 
-        `normal` and `inverted` admit no total mass below the value at which the
-        lightest species vanishes. A derivative that samples under it aborts the run
-        partway through -- or worse, under `inverted`, silently uses a negative mass
-        (see `_neutrino_mass_floor`). Both are far cheaper to catch here than after
-        hours of C_ell evaluations.
+        Each mass split admits no total mass below a floor (see `_neutrino_mass_floor`).
+        A derivative that samples under it aborts the run partway through under
+        `normal`; under `inverted` it silently uses a negative mass; under the degenerate
+        splits it silently uses the massless theory and halves the derivative. All are
+        far cheaper to catch here than after hours of C_ell evaluations.
 
         Assumes the fiducial cosmology itself is physical: CCL would already have
         refused to build it otherwise. A `pars_fid` with no `mass_split` is treated as
@@ -477,11 +483,10 @@ class Analyze(object):
             drop *= float(self.norm[ind_nu])
         if sum_fid - drop < floor:
             raise ValueError(
-                f"The {self.pars_fid['mass_split']} hierarchy admits no total neutrino "
+                f"mass_split='{self.pars_fid['mass_split']}' admits no total neutrino "
                 f"mass below {floor:.5f} eV, but the {self.derivative_method} derivative "
                 f"samples down to {sum_fid - drop:.5f} eV from a fiducial of "
-                f"{sum_fid:.5f} eV. Raise the fiducial m_nu, shrink the step, or use a "
-                "mass split with no hierarchy constraint."
+                f"{sum_fid:.5f} eV. Raise the fiducial m_nu or shrink the step."
             )
 
     def _validate_lightest_step(self):
