@@ -21,6 +21,7 @@ from copy import deepcopy
 import warnings
 
 from augur.utils.config_io import validate_amplitude_parameter
+from augur.utils.neutrinos import is_lightest, lightest_masses
 
 TRANSFER_FUNCTION_REGISTRY = {
     "boltzmann_camb": CCLPureModeTransferFunction.BOLTZMANN_CAMB,
@@ -122,15 +123,28 @@ def _create_ccl_factory(config):
     # sampler parameter. Left out, the factory silently defaults to 'normal' whatever the
     # config says, and the theory vector no longer matches the cosmology built below.
     # get, not pop: cosmo_cfg still feeds ccl.Cosmology.
-    mass_split = cosmo_cfg.get('mass_split', 'normal')
-    nu_kwargs = {'mass_split': mass_split}
-    if mass_split == 'list':
-        nu_kwargs['num_neutrino_masses'] = len(np.atleast_1d(cosmo_cfg.get('m_nu', [])))
-    elif mass_split == 'sum':
-        # CCL reads a scalar sum; firecrown registers one sampler parameter per species.
-        raise ValueError("mass_split='sum' is ambiguous between CCL and firecrown; use "
-                         "'equal', 'normal', 'inverted' or 'single' with a scalar m_nu, "
-                         "or 'list' with one mass per species.")
+    neutrino_parametrization = cosmo_cfg.get('neutrino_parametrization')
+    if is_lightest(neutrino_parametrization):
+        # The lightest-mass model derives three masses from m_nu_lightest and the fixed
+        # hierarchy, and is a frozen field of the factory (like mass_split), not a CCL
+        # cosmology field. Pop the two lightest-mass keys (ccl.Cosmology would reject
+        # them) and translate the raw cosmology to the equivalent list split, so
+        # ccl.Cosmology(**cosmo_cfg) below matches the factory's derived cosmology.
+        cosmo_cfg.pop('neutrino_parametrization', None)
+        m_lightest = cosmo_cfg.pop('m_nu_lightest')
+        cosmo_cfg['m_nu'] = lightest_masses(m_lightest, neutrino_parametrization)
+        cosmo_cfg['mass_split'] = 'list'
+        nu_kwargs = {'neutrino_parametrization': neutrino_parametrization}
+    else:
+        mass_split = cosmo_cfg.get('mass_split', 'normal')
+        nu_kwargs = {'mass_split': mass_split}
+        if mass_split == 'list':
+            nu_kwargs['num_neutrino_masses'] = len(np.atleast_1d(cosmo_cfg.get('m_nu', [])))
+        elif mass_split == 'sum':
+            # CCL reads a scalar sum; firecrown registers one sampler parameter per species.
+            raise ValueError("mass_split='sum' is ambiguous between CCL and firecrown; use "
+                             "'equal', 'normal', 'inverted' or 'single' with a scalar m_nu, "
+                             "or 'list' with one mass per species.")
 
     mg_cfg = cosmo_cfg.pop('mg_parametrization', None)
     if mg_cfg is not None:
