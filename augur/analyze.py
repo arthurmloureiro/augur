@@ -141,7 +141,7 @@ def _neutrino_mass_floor(mass_split):
     return None
 
 
-def _derivative_probe_drop(method, step, derivative_args, x0):
+def _derivative_probe_drop(method, step, derivative_args, x0, par=None):
     """
     Return how far below x0 the configured derivative method samples.
 
@@ -155,6 +155,8 @@ def _derivative_probe_drop(method, step, derivative_args, x0):
         Extra keyword arguments for the method.
     x0 : float
         Pivot value of the parameter.
+    par : str, optional
+        Name of the parameter, used when `base_abs` is given per parameter.
 
     Returns:
     --------
@@ -166,8 +168,11 @@ def _derivative_probe_drop(method, step, derivative_args, x0):
         # [x0 - h, x0 + h] with h from its own spacing rule, so reuse that rule
         # rather than restating it here. augur's defaults are '1%' and 1e-3.
         from derivkit.derivatives.adaptive.spacing import resolve_spacing
-        return resolve_spacing(derivative_args.get('spacing', '1%'), x0,
-                               derivative_args.get('base_abs', 1.e-3))
+        base_abs = derivative_args.get('base_abs', 1.e-3)
+        if isinstance(base_abs, dict):
+            # Per-parameter floors: use the one this parameter's column is built with.
+            base_abs = base_abs.get(par, base_abs.get('default', 1.e-3))
+        return resolve_spacing(derivative_args.get('spacing', '1%'), x0, float(base_abs))
     # five_pt_stencil evaluates at x0 - 2h. numdifftools' central difference only
     # reaches x0 - h, but `derivative_args` can hand it a step generator that widens
     # that, so it takes the same margin.
@@ -431,7 +436,7 @@ class Analyze(object):
         ind_nu = np.where(np.array(self.var_pars) == 'm_nu')[0][0]
         sum_fid = float(self.x[ind_nu])
         drop = _derivative_probe_drop(self.derivative_method, self.step_size,
-                                      self.derivative_args, sum_fid)
+                                      self.derivative_args, sum_fid, par='m_nu')
         if self.norm_step and (self.norm is not None) and 'derivkit' not in \
                 self.derivative_method:
             # The step is applied in normalised coordinates, so scale it back.

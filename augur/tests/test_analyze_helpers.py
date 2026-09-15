@@ -257,6 +257,27 @@ def test_derivative_probe_drop_per_method():
         == pytest.approx(0.006)
 
 
+def test_derivative_probe_drop_reads_per_parameter_base_abs():
+    # With base_abs given per parameter, the guard must use the floor the m_nu column
+    # is actually built with, not the default and not another parameter's value.
+    args = {'spacing': '1%', 'base_abs': {'m_nu': 5e-3, 'default': 1e-12}}
+    assert _derivative_probe_drop('derivkit', 0.006, args, 0.06, par='m_nu') \
+        == pytest.approx(5e-3)
+    args = {'spacing': '1%', 'base_abs': {'A_s': 1e-12, 'default': 1e-3}}
+    assert _derivative_probe_drop('derivkit', 0.006, args, 0.06, par='m_nu') \
+        == pytest.approx(1e-3)
+
+
+def test_per_parameter_base_abs_below_floor_raises():
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.004,
+            'mass_split': 'equal'}
+    cfg = {'derivative_method': 'derivkit',
+           'derivative_args': {'spacing': '1%',
+                               'base_abs': {'m_nu': 5e-3, 'default': 1e-12}}}
+    with pytest.raises(ValueError, match='admits no total neutrino mass'):
+        make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg=cfg)
+
+
 def test_varying_list_valued_mnu_raises_clearly():
     # Regression: this used to die in the pivot-vector cast with a numpy message
     # naming neither m_nu nor the split.
