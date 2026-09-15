@@ -139,9 +139,10 @@ def test_dsum_dpar_scalar_mnu():
 
 
 def test_dsum_dpar_rejects_non_neutrino_parameter():
-    # A lightest-mass parametrization would register its own parameter here; until one
-    # exists, anything else is a caller error rather than a silent zero derivative.
-    for par in ['m_nu_lightest', 'Omega_c', 'h']:
+    # Anything outside NEUTRINO_MASS_PARS is a caller error rather than a silent zero
+    # derivative. (m_nu_lightest is now a valid neutrino-mass parameter; see the
+    # lightest-mass tests below.)
+    for par in ['Omega_c', 'h', 'sigma8']:
         with pytest.raises(ValueError, match='total neutrino mass'):
             _dsum_dpar(par)
 
@@ -884,3 +885,69 @@ def test_f_2d_input_returns_correct_shape():
 
     assert result.shape == (2, 1)
     assert len(captured) == 2
+
+
+# ---------------------------------------------------------------------------
+# Lightest-neutrino-mass parametrization (G4/G5)
+# ---------------------------------------------------------------------------
+
+from augur.analyze import mnu_norm  # noqa: E402
+from augur.utils.neutrinos import fiducial_sum_mnu  # noqa: E402
+
+
+def _lightest_pars(parametrization='lightest_normal', m_l=0.02, **extra):
+    pars = {'Omega_c': 0.25, 'Omega_b': 0.05, 'h': 0.7,
+            'neutrino_parametrization': parametrization, 'm_nu_lightest': m_l}
+    pars.update(extra)
+    return pars
+
+
+def test_dsum_dpar_mnu_lightest_matches_analytic():
+    pars = _lightest_pars('lightest_normal', 0.02)
+    assert _dsum_dpar('m_nu_lightest', pars) == pytest.approx(2.2847, abs=1e-3)
+    pars_ih = _lightest_pars('lightest_inverted', 0.02)
+    assert _dsum_dpar('m_nu_lightest', pars_ih) == pytest.approx(1.747, abs=1e-3)
+
+
+def test_dsum_dpar_mnu_lightest_requires_pars_fid():
+    with pytest.raises(ValueError, match='pars_fid is required'):
+        _dsum_dpar('m_nu_lightest')
+
+
+def test_get_Om_under_lightest_uses_derived_masses():
+    # Omega_nu must come from the derived total, even though pars_fid carries
+    # m_nu_lightest (not m_nu). Masses are held fixed here (not in var_pars).
+    pars = _lightest_pars('lightest_normal', 0.02)
+    a = make_analyze(['Omega_c', 'Omega_b', 'h'], pars,
+                     extra_fisher_cfg={'transform_Omega_m': True})
+    total = fiducial_sum_mnu(pars)
+    expected = pars['Omega_c'] + pars['Omega_b'] + total / pars['h']**2 / mnu_norm
+    assert a.get_Om() == pytest.approx(expected)
+
+
+def test_reject_varying_mnu_under_lightest():
+    pars = _lightest_pars('lightest_normal', 0.02)
+    with pytest.raises(ValueError, match='not a sampler parameter'):
+        make_analyze(['Omega_c', 'm_nu'], pars)
+
+
+def test_reject_varying_mnu_lightest_without_lightest_parametrization():
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.06,
+            'mass_split': 'normal'}
+    with pytest.raises(ValueError, match='lightest-mass model'):
+        make_analyze(['Omega_c', 'm_nu_lightest'], pars)
+
+
+def test_lightest_step_below_zero_raises():
+    # A large step from a tiny fiducial drives the lightest mass negative.
+    pars = _lightest_pars('lightest_normal', 0.001)
+    with pytest.raises(ValueError, match='cannot be negative'):
+        make_analyze(['Omega_c', 'm_nu_lightest'], pars,
+                     extra_fisher_cfg={'step': 0.006})
+
+
+def test_lightest_step_above_zero_is_accepted():
+    pars = _lightest_pars('lightest_normal', 0.02)
+    a = make_analyze(['Omega_c', 'm_nu_lightest'], pars,
+                     extra_fisher_cfg={'step': 0.002})
+    assert a.var_pars == ['Omega_c', 'm_nu_lightest']

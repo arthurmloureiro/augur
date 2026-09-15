@@ -5,6 +5,8 @@ from augur.utils.diff_utils import five_pt_stencil
 from augur import generate
 from augur.utils.config_io import parse_config
 from augur.utils.theory_utils import compute_new_theory_vector
+from augur.utils.neutrinos import (
+    dsum_dmlightest, fiducial_sum_mnu, inject_lightest_into_pars, is_lightest)
 from astropy.table import Table
 import warnings
 import pandas as pd
@@ -40,12 +42,11 @@ def _sum_mnu(m_nu):
     return float(np.sum(np.atleast_1d(m_nu)))
 
 
-# Varied parameters that change the total neutrino mass. A lightest-mass
-# parametrization would register its own parameter and add it here.
-NEUTRINO_MASS_PARS = frozenset({'m_nu'})
+# Varied parameters that change the total neutrino mass.
+NEUTRINO_MASS_PARS = frozenset({'m_nu', 'm_nu_lightest'})
 
 
-def _dsum_dpar(par):
+def _dsum_dpar(par, pars_fid=None):
     """
     Return the derivative of the total neutrino mass with respect to a varied parameter.
 
@@ -53,6 +54,10 @@ def _dsum_dpar(par):
     -----------
     par : str
         Name of the varied parameter, one of `NEUTRINO_MASS_PARS`.
+    pars_fid : dict, optional
+        Fiducial parameters. Required only for `m_nu_lightest`, whose (non-unit)
+        derivative needs the fiducial lightest mass and `neutrino_parametrization`;
+        `m_nu` does not use it.
 
     Returns:
     --------
@@ -63,6 +68,13 @@ def _dsum_dpar(par):
         # Every scalar split stores the total mass itself, so this is 1 by
         # definition. 'list' never reaches here: its masses cannot be varied.
         return 1.0
+    if par == 'm_nu_lightest':
+        # The two heavier masses are sqrt(m_l^2 + dm^2), so dSum/dm_l is not 1;
+        # it depends on the fiducial lightest mass and the hierarchy.
+        if pars_fid is None:
+            raise ValueError('pars_fid is required to differentiate m_nu_lightest.')
+        return dsum_dmlightest(pars_fid['m_nu_lightest'],
+                               pars_fid['neutrino_parametrization'])
     raise ValueError(f'No derivative of the total neutrino mass with respect to {par} '
                      f'is defined. Only {sorted(NEUTRINO_MASS_PARS)} change it.')
 
@@ -89,11 +101,11 @@ def _dOm_dpars_from_neutrinos(var_pars, pars_fid):
         Maps each varied parameter that Omega_m depends on through the neutrinos to
         dOmega_m/dparameter. Empty for massless neutrinos.
     """
-    sum_mnu = _sum_mnu(pars_fid.get('m_nu', 0.0))
+    sum_mnu = fiducial_sum_mnu(pars_fid)
     if sum_mnu <= 0.0:
         return {}
     h = pars_fid['h']
-    dOm = {par: _dsum_dpar(par)/(h*h*mnu_norm)
+    dOm = {par: _dsum_dpar(par, pars_fid)/(h*h*mnu_norm)
            for par in var_pars if par in NEUTRINO_MASS_PARS}
     if 'h' in var_pars:
         dOm['h'] = -2.0 * sum_mnu / (h*h*h*mnu_norm)
@@ -232,6 +244,13 @@ class Analyze(object):
         self.data_fid = self.lk.get_data_vector()
         # Get the fiducial cosmological parameters
         self.pars_fid = tools.get_ccl_cosmology().to_dict()
+        # The lightest-mass parametrization is a firecrown sampler concept, not a CCL
+        # cosmology field, so to_dict() shows only the derived list split -- it has no
+        # m_nu_lightest or neutrino_parametrization. Carry them over from the config so
+        # the Fisher can pivot on m_nu_lightest, the Jacobian can find the hierarchy,
+        # and compute_new_theory_vector knows to route m_nu_lightest (not the stale
+        # m_nu list) to firecrown.
+        inject_lightest_into_pars(self.pars_fid, config.get('cosmo', {}))
         self.cf = tools.ccl_factory
 
         # Load the relevant section of the configuration file
@@ -399,11 +418,34 @@ class Analyze(object):
         """
         Check that varying the neutrino mass is compatible with the fiducial cosmology.
 
-        Raises ValueError if `m_nu` is varied while the fiducial cosmology carries one
-        mass per species, which `mass_split: 'list'` does. There is no single number to
-        step in that case: the pivot vector cannot hold a sequence, and the cast below
-        would fail with a numpy message naming neither the parameter nor the split.
+        Raises ValueError if:
+        - `m_nu_lightest` is varied without a lightest-mass parametrization (it is not
+          a sampler parameter then);
+        - `m_nu` is varied under a lightest-mass parametrization (there the masses are
+          derived from `m_nu_lightest`, so `m_nu` is not a sampler parameter and
+          firecrown would silently ignore it, giving a zero derivative column);
+        - `m_nu` is varied while the fiducial cosmology carries one mass per species,
+          which `mass_split: 'list'` does -- there is no single number to step, the
+          pivot vector cannot hold a sequence, and the cast would fail with a numpy
+          message naming neither the parameter nor the split.
         """
+        parametrization = self.pars_fid.get('neutrino_parametrization')
+        lightest = is_lightest(parametrization)
+
+        if 'm_nu_lightest' in self.var_pars and not lightest:
+            raise ValueError(
+                "m_nu_lightest is listed in var_pars but neutrino_parametrization is not "
+                "a lightest-mass model. Set neutrino_parametrization to 'lightest_normal' "
+                "or 'lightest_inverted', or vary m_nu instead."
+            )
+        if 'm_nu' in self.var_pars and lightest:
+            raise ValueError(
+                f"m_nu is listed in var_pars but neutrino_parametrization is "
+                f"'{parametrization}', under which the three masses are derived from "
+                "m_nu_lightest and m_nu is not a sampler parameter -- firecrown would "
+                "silently ignore it, giving a zero derivative. Vary m_nu_lightest instead."
+            )
+
         if 'm_nu' not in self.var_pars:
             return
         if np.ndim(self.pars_fid.get('m_nu', 0.0)) > 0:
@@ -428,6 +470,9 @@ class Analyze(object):
         refused to build it otherwise. A `pars_fid` with no `mass_split` is treated as
         unknown and skipped; one built from a CCL cosmology always carries it.
         """
+        if 'm_nu_lightest' in self.var_pars:
+            self._validate_lightest_step()
+            return
         if 'm_nu' not in self.var_pars:
             return
         floor = _neutrino_mass_floor(self.pars_fid.get('mass_split'))
@@ -447,6 +492,31 @@ class Analyze(object):
                 f"mass below {floor:.5f} eV, but the {self.derivative_method} derivative "
                 f"samples down to {sum_fid - drop:.5f} eV from a fiducial of "
                 f"{sum_fid:.5f} eV. Raise the fiducial m_nu or shrink the step."
+            )
+
+    def _validate_lightest_step(self):
+        """
+        Check that the derivative will not drive the lightest neutrino mass negative.
+
+        Under a lightest-mass parametrization the total mass sits above the hierarchy
+        floor by construction, so the only physical bound is m_nu_lightest >= 0. A
+        two-sided derivative that steps below zero would ask for a negative lightest
+        mass; catch it here rather than deep in CCL.
+        """
+        ind = np.where(np.array(self.var_pars) == 'm_nu_lightest')[0][0]
+        m_l_fid = float(self.x[ind])
+        drop = _derivative_probe_drop(self.derivative_method, self.step_size,
+                                      self.derivative_args, m_l_fid)
+        if self.norm_step and (self.norm is not None) and 'derivkit' not in \
+                self.derivative_method:
+            # The step is applied in normalised coordinates, so scale it back.
+            drop *= float(self.norm[ind])
+        if m_l_fid - drop < 0.0:
+            raise ValueError(
+                f"The {self.derivative_method} derivative samples m_nu_lightest down to "
+                f"{m_l_fid - drop:.5f} eV from a fiducial of {m_l_fid:.5f} eV, but the "
+                "lightest neutrino mass cannot be negative. Raise the fiducial "
+                "m_nu_lightest or shrink the step."
             )
 
     def _validate_amplitude_in_var_pars(self):
@@ -543,14 +613,16 @@ class Analyze(object):
                 Om += self.pars_fid['Omega_c']
             if 'Omega_b' in self.pars_fid.keys():
                 Om += self.pars_fid['Omega_b']
-            if 'm_nu' in self.pars_fid.keys():
-                m_nu = _sum_mnu(self.pars_fid['m_nu'])
-                if m_nu > 0.0:
-                    if 'h' not in self.pars_fid.keys():
-                        raise ValueError('Require h to be specified \
-                                         when transforming the Fisher matrix to Omega_m with m_nu')
-                    h = self.pars_fid['h']
-                    Om += m_nu/h/h/mnu_norm
+            # fiducial_sum_mnu is 0 for massless neutrinos, the scalar/list total for
+            # a mass_split cosmology, and the derived total under a lightest-mass
+            # parametrization (where pars_fid carries m_nu_lightest, not m_nu).
+            m_nu = fiducial_sum_mnu(self.pars_fid)
+            if m_nu > 0.0:
+                if 'h' not in self.pars_fid.keys():
+                    raise ValueError('Require h to be specified \
+                                     when transforming the Fisher matrix to Omega_m with m_nu')
+                h = self.pars_fid['h']
+                Om += m_nu/h/h/mnu_norm
             self.Om = Om
         return self.Om
 

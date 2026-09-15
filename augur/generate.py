@@ -16,6 +16,7 @@ from augur.utils.cov_utils import get_gaus_cov, get_SRD_cov, get_noise_power
 from augur.utils.cov_utils import TJPCovGaus
 from augur.generate_utils.cmb_lensing import add_cmb_lensing, add_cmb_tracer
 from augur.generate_utils.cmb_lensing import CMB_TRACER_NAME
+from augur.utils.neutrinos import ccl_cosmo_kwargs, inject_lightest_into_pars
 from augur.generate_utils.cmb_lensing import _tracer_pair as _cmb_tracer_pair
 from augur.utils.theory_utils import compute_new_theory_vector
 import firecrown.likelihood.weak_lensing as wl
@@ -392,7 +393,11 @@ def generate_sacc_and_stats(config):
             cosmo_cfg['mg_parametrization'] = ccl.modified_gravity.mu_Sigma.MuSigmaMG(**mu_sig)
     validate_amplitude_parameter(cosmo_cfg)
     try:
-        cosmo = ccl.Cosmology(**cosmo_cfg)
+        # ccl_cosmo_kwargs translates a lightest-mass parametrization to the derived
+        # list split and drops the lightest-mass keys pyccl.Cosmology cannot take. It
+        # copies cosmo_cfg, so the shared config keeps the parametrization for the
+        # CCLFactory built later.
+        cosmo = ccl.Cosmology(**ccl_cosmo_kwargs(cosmo_cfg))
     except (KeyError, TypeError, ValueError) as e:
         logger.error('Error in cosmology configuration. Check the config file.')
         # Reraise the exception to see the full traceback
@@ -806,7 +811,10 @@ def generate(configs, return_all_outputs=False, write_sacc=True, use_sacc=None,
             lk = ConstGaussian(statistics=stats)
             lk.read(S)
 
-    _pars = cosmo.to_dict()
+    # to_dict() shows only the derived list split under a lightest-mass parametrization;
+    # re-add m_nu_lightest / neutrino_parametrization so the fiducial ParamsMap carries
+    # the sampler parameter the factory registered (not the stale m_nu list).
+    _pars = inject_lightest_into_pars(cosmo.to_dict(), config['cosmo'])
     # Populate ModelingTools and likelihood
     _, lk, tools = compute_new_theory_vector(lk, tools, sys_params, _pars, return_all=True)
 
