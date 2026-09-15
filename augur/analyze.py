@@ -40,6 +40,66 @@ def _sum_mnu(m_nu):
     return float(np.sum(np.atleast_1d(m_nu)))
 
 
+# Varied parameters that change the total neutrino mass. A lightest-mass
+# parametrization would register its own parameter and add it here.
+NEUTRINO_MASS_PARS = frozenset({'m_nu'})
+
+
+def _dsum_dpar(par):
+    """
+    Return the derivative of the total neutrino mass with respect to a varied parameter.
+
+    Parameters:
+    -----------
+    par : str
+        Name of the varied parameter, one of `NEUTRINO_MASS_PARS`.
+
+    Returns:
+    --------
+    dsum_dpar : float
+        dSum(m_nu)/dpar.
+    """
+    if par == 'm_nu':
+        # Every scalar split stores the total mass itself, so this is 1 by
+        # definition. 'list' never reaches here: its masses cannot be varied.
+        return 1.0
+    raise ValueError(f'No derivative of the total neutrino mass with respect to {par} '
+                     f'is defined. Only {sorted(NEUTRINO_MASS_PARS)} change it.')
+
+
+def _dOm_dpars_from_neutrinos(var_pars, pars_fid):
+    """
+    Return dOmega_m/dparameter for every varied parameter the neutrinos couple to.
+
+    Massive neutrinos contribute Omega_nu = Sum(m_nu)/(93.14 h^2), so Omega_m depends
+    on the masses and, separately, on h. The h dependence is there whenever the
+    neutrinos are massive -- holding the masses fixed does not remove it.
+
+    Parameters:
+    -----------
+    var_pars : list of str
+        Names of the varied parameters, in Fisher-matrix order.
+    pars_fid : dict
+        Fiducial parameters. `h` is required if the neutrinos are massive; `get_Om`
+        raises the informative error for its absence before this is reached.
+
+    Returns:
+    --------
+    dOm : dict
+        Maps each varied parameter that Omega_m depends on through the neutrinos to
+        dOmega_m/dparameter. Empty for massless neutrinos.
+    """
+    sum_mnu = _sum_mnu(pars_fid.get('m_nu', 0.0))
+    if sum_mnu <= 0.0:
+        return {}
+    h = pars_fid['h']
+    dOm = {par: _dsum_dpar(par)/(h*h*mnu_norm)
+           for par in var_pars if par in NEUTRINO_MASS_PARS}
+    if 'h' in var_pars:
+        dOm['h'] = -2.0 * sum_mnu / (h*h*h*mnu_norm)
+    return dOm
+
+
 class Analyze(object):
     def __init__(self, config, likelihood=None, tools=None, req_params=None,
                  norm_step=False):
@@ -409,14 +469,12 @@ class Analyze(object):
                     ind_b = np.where(np.array(self.var_pars) == 'Omega_b')[0][0]
                     J[ind_c][ind_b] = -1.0
 
-                if 'm_nu' in self.var_pars:
-                    mnu = self.pars_fid['m_nu']
-                    h = self.pars_fid['h']
-                    ind_nu = np.where(np.array(self.var_pars) == 'm_nu')[0][0]
-                    J[ind_c][ind_nu] = -1.0/(h*h*mnu_norm)
-                    if 'h' in self.var_pars:
-                        ind_h = np.where(np.array(self.var_pars) == 'h')[0][0]
-                        J[ind_c][ind_h] = 2.0 * mnu / (h*h*h*mnu_norm)
+                # Omega_c = Omega_m - Omega_b - Omega_nu, so every neutrino-sector
+                # entry of this row is -dOmega_m/dpar.
+                for par, dOm_dpar in _dOm_dpars_from_neutrinos(self.var_pars,
+                                                               self.pars_fid).items():
+                    ind_par = np.where(np.array(self.var_pars) == par)[0][0]
+                    J[ind_c][ind_par] = -dOm_dpar
 
                 logger.info('Replaced Omega_c with Omega_m in Jacobian')
 
@@ -441,14 +499,12 @@ class Analyze(object):
                     if 'Omega_b' in self.var_pars:
                         ind_b = np.where(np.array(self.var_pars) == 'Omega_b')[0][0]
                         J[ind_sigma8][ind_b] = -0.5 * sigma_8 / Om
-                    if 'm_nu' in self.var_pars:
-                        mnu = self.pars_fid['m_nu']
-                        h = self.pars_fid['h']
-                        ind_nu = np.where(np.array(self.var_pars) == 'm_nu')[0][0]
-                        J[ind_sigma8][ind_nu] = -0.5 * sigma_8 / Om * (1.0/(h*h*mnu_norm))
-                        if 'h' in self.var_pars:
-                            ind_h = np.where(np.array(self.var_pars) == 'h')[0][0]
-                            J[ind_sigma8][ind_h] = sigma_8 * mnu / (Om * h**3 * mnu_norm)
+                    # Same derivatives, carried into sigma8 = S8 sqrt(0.3/Omega_m)
+                    # by the one chain-rule factor below.
+                    for par, dOm_dpar in _dOm_dpars_from_neutrinos(self.var_pars,
+                                                                   self.pars_fid).items():
+                        ind_par = np.where(np.array(self.var_pars) == par)[0][0]
+                        J[ind_sigma8][ind_par] = -0.5 * sigma_8 / Om * dOm_dpar
                 logger.info("Replaced sigma8 with S8 in Jacobian")
             self.J = J
 
