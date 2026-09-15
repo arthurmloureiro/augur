@@ -1,7 +1,9 @@
 import numpy as np
+import pyccl as ccl
 import pytest
 
-from augur.analyze import Analyze, _sum_mnu, _dsum_dpar
+from augur.analyze import (Analyze, _sum_mnu, _dsum_dpar, _neutrino_mass_floor,
+                           _derivative_probe_drop)
 
 
 class DummyLikelihood:
@@ -189,6 +191,115 @@ def test_Jacobian_list_mnu_matches_scalar():
                           extra_fisher_cfg=cfg)
     np.testing.assert_allclose(listed.Jacobian_transform(),
                                scalar.Jacobian_transform(), rtol=1e-12)
+
+
+def test_neutrino_mass_floor_matches_ccl_constants():
+    # The floor is where the lightest mass reaches zero, built from CCL's own
+    # oscillation constants so it tracks them if they are ever updated.
+    c = ccl.physical_constants
+    nh = np.sqrt(c.DELTAM12_sq) + np.sqrt(c.DELTAM13_sq_pos)
+    d13 = abs(c.DELTAM13_sq_neg)
+    ih = np.sqrt(d13) + np.sqrt(d13 + c.DELTAM12_sq)
+    assert pytest.approx(_neutrino_mass_floor('normal'), rel=1e-12) == nh
+    assert pytest.approx(_neutrino_mass_floor('inverted'), rel=1e-12) == ih
+    # No hierarchy constraint for the rest, and an unspecified split is unknown.
+    for split in ['equal', 'single', 'sum', 'list', None]:
+        assert _neutrino_mass_floor(split) is None
+
+
+def test_neutrino_mass_floor_is_where_ccl_stops_being_physical():
+    # CCL raises at the right place for the normal hierarchy, but for inverted it
+    # raises 1.5 meV too low and quietly returns a negative lightest mass in between.
+    # The guard must not delegate to it.
+    for split in ['normal', 'inverted']:
+        floor = _neutrino_mass_floor(split)
+        # At the floor the lightest species is massless; just above it, all positive.
+        assert np.min(ccl.nu_masses(m_nu=floor*(1+1e-9), mass_split=split)) >= 0.0
+
+    # Normal: CCL refuses below the floor, which is the correct behaviour.
+    with pytest.raises(ValueError):
+        ccl.nu_masses(m_nu=_neutrino_mass_floor('normal')*(1-1e-6), mass_split='normal')
+
+    # Inverted: CCL only refuses ~1.5 meV lower, and in between returns a negative
+    # lightest mass with no error at all. That window is why the floor is enforced here.
+    ih = _neutrino_mass_floor('inverted')
+    assert np.min(ccl.nu_masses(m_nu=ih*(1-1e-6), mass_split='inverted')) < 0.0
+    assert np.min(ccl.nu_masses(m_nu=0.0985, mass_split='inverted')) < 0.0
+    with pytest.raises(ValueError):
+        ccl.nu_masses(m_nu=0.0977, mass_split='inverted')
+
+
+def test_derivative_probe_drop_per_method():
+    # five_pt_stencil samples x0 - 2h; numdifftools' step can be widened through
+    # derivative_args, so it takes the same margin.
+    assert _derivative_probe_drop('5pt_stencil', 0.006, {}, 0.12) == pytest.approx(0.012)
+    assert _derivative_probe_drop('numdifftools', 0.006, {}, 0.12) == pytest.approx(0.012)
+    # derivkit ignores `step` entirely: its half-width is max(frac*|x0|, base_abs).
+    assert _derivative_probe_drop('derivkit', 0.006, {}, 0.12) == pytest.approx(0.0012)
+    assert _derivative_probe_drop('derivkit', 0.006, {}, 0.06) == pytest.approx(0.001)
+    assert _derivative_probe_drop('derivkit', 0.006, {'spacing': '5%'}, 0.12) \
+        == pytest.approx(0.006)
+
+
+def test_varying_list_valued_mnu_raises_clearly():
+    # Regression: this used to die in the pivot-vector cast with a numpy message
+    # naming neither m_nu nor the split.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': [0.05, 0.01, 0.0],
+            'mass_split': 'list'}
+    with pytest.raises(ValueError, match='m_nu'):
+        make_analyze(['Omega_c', 'm_nu'], pars)
+
+
+def test_step_below_hierarchy_floor_raises():
+    # Sum = 0.06 under the normal hierarchy: a 0.006 step reaches 0.048, well under
+    # the 0.0592 floor, and CCL would abort the run partway through the derivatives.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.06,
+            'mass_split': 'normal'}
+    with pytest.raises(ValueError, match='hierarchy'):
+        make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg={'step': 0.006})
+
+
+def test_step_above_hierarchy_floor_is_accepted():
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.12,
+            'mass_split': 'normal'}
+    a = make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg={'step': 0.006})
+    assert a.var_pars == ['Omega_c', 'm_nu']
+
+
+def test_derivkit_step_below_floor_raises():
+    # The case a `Sum - 2*step` rule misses: derivkit never reads `step`, and its
+    # 1e-3 default floor on the half-width reaches 0.059 from a 0.06 fiducial.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.06,
+            'mass_split': 'normal'}
+    cfg = {'derivative_method': 'derivkit', 'step': 1e-8}
+    with pytest.raises(ValueError, match='hierarchy'):
+        make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg=cfg)
+
+
+def test_inverted_floor_guards_ccl_silent_window():
+    # Sum = 0.0995 with derivkit reaches 0.0985: CCL does not raise there, it returns
+    # a negative lightest mass. Enforcing the true floor is the whole point.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.0995,
+            'mass_split': 'inverted'}
+    cfg = {'derivative_method': 'derivkit', 'step': 1e-8}
+    with pytest.raises(ValueError, match='hierarchy'):
+        make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg=cfg)
+
+
+def test_no_floor_check_for_degenerate_split():
+    # 'equal' has no hierarchy constraint, so a tiny fiducial is legal.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.01,
+            'mass_split': 'equal'}
+    a = make_analyze(['Omega_c', 'm_nu'], pars, extra_fisher_cfg={'step': 0.006})
+    assert a.var_pars == ['Omega_c', 'm_nu']
+
+
+def test_no_floor_check_when_mnu_is_not_varied():
+    # Nothing steps the masses, so the floor cannot be crossed.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.06,
+            'mass_split': 'normal'}
+    a = make_analyze(['Omega_c', 'h'], pars, extra_fisher_cfg={'step': 0.006})
+    assert 'm_nu' not in a.var_pars
 
 
 def test_add_gaussian_priors_preserves_width_order():
