@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from augur.analyze import Analyze, _sum_mnu
+from augur.analyze import Analyze, _sum_mnu, _dsum_dpar
 
 
 class DummyLikelihood:
@@ -129,6 +129,66 @@ def test_Jacobian_transform_entries():
     # Check S8 diagonal scaling
     expected_s8_diag = 1.0 / np.sqrt(a.get_Om() / 0.3)
     assert pytest.approx(J[ind_sigma8][ind_sigma8], rel=1e-8) == expected_s8_diag
+
+
+def test_dsum_dpar_scalar_mnu():
+    # Every scalar split stores the total mass itself, so dSum/dm_nu is 1 by definition.
+    assert _dsum_dpar('m_nu') == 1.0
+
+
+def test_dsum_dpar_rejects_non_neutrino_parameter():
+    # A lightest-mass parametrization would register its own parameter here; until one
+    # exists, anything else is a caller error rather than a silent zero derivative.
+    for par in ['m_nu_lightest', 'Omega_c', 'h']:
+        with pytest.raises(ValueError, match='total neutrino mass'):
+            _dsum_dpar(par)
+
+
+def test_Jacobian_h_term_survives_fixed_mnu():
+    # Regression: Omega_m depends on h through Omega_nu = Sum(m_nu)/(93.14 h^2) whether
+    # or not the masses are varied. The h term used to be nested inside the m_nu guard,
+    # so holding the masses fixed dropped it silently.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.06, 'sigma8': 0.8}
+    var_pars = ['Omega_c', 'Omega_b', 'h', 'sigma8']
+    a = make_analyze(var_pars, pars, extra_fisher_cfg={'transform_Omega_m': True})
+    J = a.Jacobian_transform()
+    ind_c, ind_h = var_pars.index('Omega_c'), var_pars.index('h')
+    expected = 2.0 * 0.06 / (0.7 ** 3 * 93.14)
+    assert pytest.approx(J[ind_c][ind_h], rel=1e-8) == expected
+
+
+def test_Jacobian_h_term_survives_fixed_mnu_S8_row():
+    # The same hole in the sigma8 row, reachable when only S8 is transformed.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.06, 'sigma8': 0.8}
+    var_pars = ['Omega_c', 'Omega_b', 'h', 'sigma8']
+    a = make_analyze(var_pars, pars, extra_fisher_cfg={'transform_S8': True})
+    J = a.Jacobian_transform()
+    ind_8, ind_h = var_pars.index('sigma8'), var_pars.index('h')
+    expected = 0.8 * 0.06 / (a.get_Om() * 0.7 ** 3 * 93.14)
+    assert pytest.approx(J[ind_8][ind_h], rel=1e-8) == expected
+
+
+def test_Jacobian_neutrino_terms_absent_when_massless():
+    # No neutrino mass, no neutrino coupling: h must not pick up a spurious entry.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu': 0.0, 'sigma8': 0.8}
+    var_pars = ['Omega_c', 'Omega_b', 'h', 'sigma8']
+    a = make_analyze(var_pars, pars, extra_fisher_cfg={'transform_Omega_m': True})
+    J = a.Jacobian_transform()
+    ind_c, ind_h = var_pars.index('Omega_c'), var_pars.index('h')
+    assert J[ind_c][ind_h] == 0.0
+
+
+def test_Jacobian_list_mnu_matches_scalar():
+    # mass_split 'list' cannot vary its masses, so it always takes the fixed-mass path
+    # above. The same total mass, written either way, must give the same Jacobian.
+    var_pars = ['Omega_c', 'Omega_b', 'h', 'sigma8']
+    common = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'sigma8': 0.8}
+    cfg = {'transform_Omega_m': True}
+    scalar = make_analyze(var_pars, {**common, 'm_nu': 0.06}, extra_fisher_cfg=cfg)
+    listed = make_analyze(var_pars, {**common, 'm_nu': [0.02, 0.02, 0.02]},
+                          extra_fisher_cfg=cfg)
+    np.testing.assert_allclose(listed.Jacobian_transform(),
+                               scalar.Jacobian_transform(), rtol=1e-12)
 
 
 def test_add_gaussian_priors_preserves_width_order():
