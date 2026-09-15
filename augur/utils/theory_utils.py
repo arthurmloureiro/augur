@@ -1,4 +1,5 @@
 from firecrown.parameters import ParamsMap
+from augur.utils.neutrinos import is_lightest
 import warnings
 
 
@@ -42,6 +43,15 @@ def compute_new_theory_vector(lk, tools, _sys_pars, _pars, return_all=False):
     # mass_split is a string, and it is a frozen field of the CCLFactory (set in
     # _create_ccl_factory) rather than a sampler parameter: no place for it in a ParamsMap.
     dict_all.pop('mass_split', None)
+
+    # neutrino_parametrization is likewise a frozen field of the CCLFactory, not a
+    # sampler parameter. Under a lightest-mass parametrization firecrown derives the
+    # three masses from the sampler parameter m_nu_lightest and does not register m_nu,
+    # so a leftover (fiducial) m_nu would be silently ignored -- a zero derivative
+    # column. Drop it; m_nu_lightest stays.
+    neutrino_parametrization = dict_all.pop('neutrino_parametrization', None)
+    if is_lightest(neutrino_parametrization):
+        dict_all.pop('m_nu', None)
 
     hm = dict_all.pop('extra_parameters', None)
     if hm is not None and 'camb' in hm.keys():

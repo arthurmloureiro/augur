@@ -35,3 +35,20 @@ def test_compute_new_theory_vector_strips_non_sampler_keys():
     # ... the sampled floats do, and both objects see the same map
     assert {'Omega_c', 'sigma8', 'm_nu', 'lens0_bias'} <= keys
     assert lk.pmap is tools.pmap
+
+
+def test_lightest_parametrization_drops_mnu_keeps_lightest():
+    # Under a lightest-mass parametrization firecrown derives the masses from the
+    # sampler parameter m_nu_lightest, so the stale (fiducial) m_nu list and the frozen
+    # neutrino_parametrization field must be stripped, and m_nu_lightest kept.
+    lk, tools = _Recorder(), _Recorder()
+    pars = {'Omega_c': 0.25, 'A_s': 2.1e-9, 'sigma8': None,
+            'neutrino_parametrization': 'lightest_normal', 'm_nu_lightest': 0.02,
+            'm_nu': [0.02, 0.0218, 0.0543], 'mass_split': 'list'}
+    out = compute_new_theory_vector(lk, tools, {'lens0_bias': 1.5}, pars)
+
+    assert out.shape == (3,)
+    keys = set(tools.pmap.keys())
+    assert 'm_nu_lightest' in keys
+    assert not keys & {'m_nu', 'mass_split', 'neutrino_parametrization', 'sigma8'}
+    assert {'Omega_c', 'A_s', 'lens0_bias'} <= keys

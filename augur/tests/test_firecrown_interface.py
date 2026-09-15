@@ -144,3 +144,19 @@ def test_mass_split_reaches_mu_sigma_branch():
 def test_mass_split_sum_rejected():
     with pytest.raises(ValueError, match="ambiguous"):
         fci._create_ccl_factory(_nu_cfg(m_nu=0.06, mass_split='sum'))
+
+
+def test_lightest_parametrization_reaches_factory_and_cosmology():
+    # A lightest-mass config must (a) hand neutrino_parametrization to the factory and
+    # (b) translate the raw cosmology to the equivalent three-mass list split, so
+    # ccl.Cosmology matches the factory.
+    from augur.utils.neutrinos import lightest_masses
+    factory, cosmo = fci._create_ccl_factory(
+        _nu_cfg(neutrino_parametrization='lightest_normal', m_nu_lightest=0.02))
+    assert str(factory.neutrino_parametrization) == 'lightest_normal'
+    built = cosmo.to_dict()
+    assert built['mass_split'] == 'list'
+    expected = np.sort(lightest_masses(0.02, 'lightest_normal'))
+    np.testing.assert_allclose(np.sort(ccl.nu_masses(m_nu=built['m_nu'],
+                                                     mass_split='list')),
+                               expected, rtol=1e-10)
