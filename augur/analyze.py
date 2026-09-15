@@ -506,7 +506,7 @@ class Analyze(object):
         ind = np.where(np.array(self.var_pars) == 'm_nu_lightest')[0][0]
         m_l_fid = float(self.x[ind])
         drop = _derivative_probe_drop(self.derivative_method, self.step_size,
-                                      self.derivative_args, m_l_fid)
+                                      self.derivative_args, m_l_fid, par='m_nu_lightest')
         if self.norm_step and (self.norm is not None) and 'derivkit' not in \
                 self.derivative_method:
             # The step is applied in normalised coordinates, so scale it back.

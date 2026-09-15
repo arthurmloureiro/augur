@@ -951,3 +951,15 @@ def test_lightest_step_above_zero_is_accepted():
     a = make_analyze(['Omega_c', 'm_nu_lightest'], pars,
                      extra_fisher_cfg={'step': 0.002})
     assert a.var_pars == ['Omega_c', 'm_nu_lightest']
+
+
+def test_lightest_guard_reads_per_parameter_base_abs():
+    # Under a lightest-mass parametrization the floor check must use m_nu_lightest's own
+    # entry of a per-parameter base_abs, not the default: 0.004 - 0.005 < 0 must be refused.
+    pars = {'Omega_c': 0.2, 'Omega_b': 0.05, 'h': 0.7, 'm_nu_lightest': 0.004,
+            'neutrino_parametrization': 'lightest_normal'}
+    cfg = {'derivative_method': 'derivkit',
+           'derivative_args': {'spacing': '1%',
+                               'base_abs': {'m_nu_lightest': 5e-3, 'default': 1e-12}}}
+    with pytest.raises(ValueError, match='lightest neutrino mass cannot be negative'):
+        make_analyze(['Omega_c', 'm_nu_lightest'], pars, extra_fisher_cfg=cfg)
